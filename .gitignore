@@ -1,0 +1,15 @@
+# Secrets and generated data
+.env
+auth.json
+*.log
+*.db
+*.db-shm
+*.db-wal
+state.db
+state.db-*
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+.venv/
+venv/
