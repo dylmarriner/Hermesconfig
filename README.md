@@ -35,7 +35,7 @@ tokenjuice, subconscious, memory_tree, model_council, codegraph, learning, ragfl
 From PowerShell (as admin or user):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "iex (iwr -UseBasicParsing 'https://raw.githubusercontent.com/dylmarriner/Hermesconfig/main/install.ps1')"
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/dylmarriner/Hermesconfig/main/install.ps1 | iex"
 ```
 
 Or clone and run manually:

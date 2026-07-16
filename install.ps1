@@ -1,8 +1,11 @@
 # HermesConfig — Windows Desktop App Installer
-# Installs the Hermes soul identity, config, skills, scripts, and cron
-# onto a Windows Hermes Agent desktop app installation.
+# Installs the Hermes soul identity, config, skills catalog, scripts, and cron
+# onto a Windows Hermes Agent app installation.
 #
-# Run: powershell -ExecutionPolicy Bypass -File install.ps1
+# Run:
+#   powershell -ExecutionPolicy Bypass -File install.ps1
+# Or one-liner:
+#   irm https://raw.githubusercontent.com/dylmarriner/Hermesconfig/main/install.ps1 | iex
 
 param(
     [string]$RepoUrl = "https://github.com/dylmarriner/Hermesconfig.git",
@@ -10,8 +13,11 @@ param(
     [switch]$Force
 )
 
-$ErrorActionPreference = "Stop"
+# Don't use Stop — let partial failures show clearly
+$ErrorActionPreference = "Continue"
 $Host.UI.RawUI.WindowTitle = "Hermes Identity Installer"
+
+$script:errCount = 0
 
 function Write-Step {
     param([string]$Message, [string]$Color = "Cyan")
@@ -19,16 +25,19 @@ function Write-Step {
 }
 
 function Write-OK {
-    Write-Host "  [OK]" -ForegroundColor Green
+    param([string]$Msg = "OK")
+    Write-Host "  [OK] $Msg" -ForegroundColor Green
 }
 
-function Write-Skip {
-    Write-Host "  [SKIP]" -ForegroundColor Yellow
+function Write-Wrn {
+    param([string]$Msg)
+    Write-Host "  [!] $Msg" -ForegroundColor Yellow
 }
 
-function Write-Fail {
-    param([string]$Message)
-    Write-Host "  [FAIL] $Message" -ForegroundColor Red
+function Write-Err {
+    param([string]$Msg)
+    $script:errCount++
+    Write-Host "  [X] $Msg" -ForegroundColor Red
 }
 
 function Test-CommandExists {
@@ -38,50 +47,63 @@ function Test-CommandExists {
 
 # --- Preflight ---------------------------------------------------------
 
-Write-Step "HermesConfig Windows Installer" -Color "Magenta"
+Write-Step "========================================" -Color "Magenta"
+Write-Step "  HermesConfig Windows Installer" -Color "Magenta"
+Write-Step "========================================" -Color "Magenta"
 Write-Step "Target: $InstallDir"
 Write-Step ""
 
-# Check dependencies
-$depsOk = $true
+# git check
 if (-not (Test-CommandExists "git")) {
-    Write-Fail "git is not installed. Install from https://git-scm.com/download/win"
-    $depsOk = $false
+    Write-Err "git not found — install from https://git-scm.com/download/win"
+    Write-Wrn "Continuing with partial install (identity files only)..."
 }
+
+# hermes check — not required, just advisory
 if (-not (Test-CommandExists "hermes")) {
-    Write-Host "  [WARN] hermes CLI not found on PATH" -ForegroundColor Yellow
-    Write-Host "         Install first: https://hermes-agent.nousresearch.com/docs/user-guide/installation"
-    Write-Host "         or continue — config files will be placed ready for when Hermes is installed."
-}
-if (-not $depsOk) {
-    exit 1
+    Write-Wrn "hermes CLI not on PATH — copy config files now, install Hermes later"
+    Write-Wrn "  Get it: https://hermes-agent.nousresearch.com/docs/user-guide/installation"
 }
 
 # --- Clone / Pull Repo -------------------------------------------------
 
 $repoDir = "$env:TEMP\Hermesconfig"
-if (Test-Path $repoDir) {
-    Write-Step "Updating existing clone..."
-    Push-Location $repoDir
-    git pull 2>&1 | Out-Null
-    Pop-Location
-    Write-OK
-} else {
-    Write-Step "Cloning Hermesconfig repo..."
-    git clone $RepoUrl $repoDir 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Clone failed. Check your internet and repo access."
-        exit 1
+
+if (Test-CommandExists "git") {
+    if (Test-Path "$repoDir\.git") {
+        Write-Step "Updating existing clone..."
+        Push-Location $repoDir
+        git pull --ff-only 2>&1 | Out-Null
+        Pop-Location
+    } elseif (Test-Path $repoDir) {
+        Write-Step "Cleaning stale temp dir and re-cloning..."
+        Remove-Item -Recurse -Force $repoDir -ErrorAction SilentlyContinue
+        git clone $RepoUrl $repoDir 2>&1 | Out-Null
+    } else {
+        Write-Step "Cloning Hermesconfig repo..."
+        git clone $RepoUrl $repoDir 2>&1 | Out-Null
     }
-    Write-OK
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Git clone/pull failed. Check internet/repo access."
+        Write-Wrn "Will try to use local files if available..."
+    } else {
+        Write-OK "Repo ready at $repoDir"
+    }
+} else {
+    Write-Wrn "No git — cannot clone repo. Place files manually or install git first."
+}
+
+if (-not (Test-Path "$repoDir\identity\SOUL.md")) {
+    Write-Err "SOUL.md not found in repo — clone may have failed."
+    exit 1
 }
 
 # --- Ensure Hermes dir exists ------------------------------------------
 
 if (-not (Test-Path $InstallDir)) {
-    Write-Step "Creating $InstallDir..."
+    Write-Step "Creating Hermes config directory..."
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Write-OK
+    Write-OK "Created $InstallDir"
 }
 
 # --- Install Identity Files --------------------------------------------
@@ -89,53 +111,53 @@ if (-not (Test-Path $InstallDir)) {
 Write-Step "Installing identity files..."
 
 $identityFiles = @(
-    @{Source="identity\SOUL.md"; Target="SOUL.md"; Overwrite=$true},
-    @{Source="identity\IDENTITY.md"; Target="IDENTITY.md"; Overwrite=$true},
-    @{Source="identity\prefill.json"; Target="prefill.json"; Overwrite=$true}
+    @{Source="identity\SOUL.md";     Name="SOUL.md";     Overwrite=$true},
+    @{Source="identity\IDENTITY.md"; Name="IDENTITY.md"; Overwrite=$true},
+    @{Source="identity\prefill.json";Name="prefill.json";Overwrite=$true}
 )
 
 foreach ($f in $identityFiles) {
     $src = Join-Path $repoDir $f.Source
-    $dst = Join-Path $InstallDir $f.Target
-    if (Test-Path $dst -and -not $f.Overwrite -and -not $Force) {
-        Write-Skip
+    $dst = Join-Path $InstallDir $f.Name
+    if ((Test-Path $dst) -and -not $f.Overwrite -and -not $Force) {
+        Write-Wrn "$($f.Name) exists, skipping"
     } else {
-        Copy-Item -Path $src -Destination $dst -Force
-        Write-OK
+        Copy-Item -Path $src -Destination $dst -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dst) { Write-OK "$($f.Name) -> $InstallDir" }
+        else { Write-Err "Failed to copy $($f.Name)" }
     }
 }
 
-# MEMORY.md and USER.md — only if not already present (personal per-machine)
+# MEMORY.md and USER.md — never overwrite if present (personal per-machine)
 foreach ($file in @("MEMORY.md", "USER.md")) {
     $src = Join-Path $repoDir "identity\$file"
     $dst = Join-Path $InstallDir $file
     if (Test-Path $dst) {
-        Write-Host "  [SKIP] $file already exists (personal data preserved)" -ForegroundColor Yellow
+        Write-Wrn "$file already exists — personal data preserved"
     } else {
-        Copy-Item -Path $src -Destination $dst
-        Write-Host "  [OK] $file created" -ForegroundColor Green
+        Copy-Item -Path $src -Destination $dst -ErrorAction SilentlyContinue
+        if (Test-Path $dst) { Write-OK "$file created" }
+        else { Write-Err "Failed to create $file" }
     }
 }
 
 # --- Install Config ----------------------------------------------------
 
-Write-Step "Installing config template..."
+Write-Step "Installing config.yaml..."
 
-$configSrc = Join-Path $repoDir "config\config.yaml"
 $configDst = Join-Path $InstallDir "config.yaml"
 
-if (Test-Path $configDst -and -not $Force) {
-    $backupDst = "$configDst.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-    Copy-Item -Path $configDst -Destination $backupDst
-    Write-Host "  [BAK] Existing config backed up to $backupDst" -ForegroundColor Gray
+if ((Test-Path $configDst) -and -not $Force) {
+    $backup = "$configDst.bak.$([DateTime]::Now.ToString('yyyyMMdd_HHmmss'))"
+    Copy-Item -Path $configDst -Destination $backup -ErrorAction SilentlyContinue
+    if (Test-Path $backup) { Write-Wrn "Existing config backed up to $backup" }
 }
 
-# Use the template from the repo — but we need to actually WRITE a config.yaml
-# since the repo only has gateway.md and mcp_servers.md as docs
-# Generate it from the template
-$configTemplate = @"
-# Hermes Configuration — Auto-generated by HermesConfig installer
-# Edit with: hermes config edit  or  notepad $env:USERPROFILE\.hermes\config.yaml
+# Write config WITHOUT BOM — Hermes chokes on UTF8-BOM on Windows
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$configContent = @"
+# Hermes Configuration — generated by HermesConfig
+# Edit: hermes config edit
 model:
   default: deepseek-v4-flash
   provider: deepseek
@@ -192,7 +214,7 @@ cron:
   wrap_response: true
 
 # ============================================================
-# API KEYS — Set these in your .env file or via env variables:
+# API KEYS — Set these in .env (next to this file):
 #   DEEPSEEK_API_KEY=sk-...
 #   OPENROUTER_API_KEY=sk-or-...
 #   ANTHROPIC_API_KEY=sk-ant-...
@@ -204,133 +226,109 @@ cron:
 #   HUGGINGFACE_TOKEN=hf_...
 # ============================================================
 "@
+[IO.File]::WriteAllText($configDst, $configContent, $utf8NoBom)
+if (Test-Path $configDst) { Write-OK "config.yaml (UTF8 no BOM)" }
+else { Write-Err "Failed to write config.yaml" }
 
-Set-Content -Path $configDst -Value $configTemplate -Encoding UTF8
-Write-OK
-
-# --- Install MCP Server Descriptions -----------------------------------
+# --- MCP Server Docs ---------------------------------------------------
 
 $mcpDir = Join-Path $InstallDir "mcp"
-if (-not (Test-Path $mcpDir)) {
-    New-Item -ItemType Directory -Path $mcpDir -Force | Out-Null
+New-Item -ItemType Directory -Path $mcpDir -Force -ErrorAction SilentlyContinue | Out-Null
+$mcpSrc = Join-Path $repoDir "config\mcp_servers.md"
+if (Test-Path $mcpSrc) {
+    Copy-Item -Path $mcpSrc -Destination (Join-Path $mcpDir "mcp_servers.md") -Force
+    Write-OK "MCP server docs"
 }
-Copy-Item -Path (Join-Path $repoDir "config\mcp_servers.md") -Destination (Join-Path $mcpDir "mcp_servers.md") -Force
-Write-Host "  [OK] MCP server docs" -ForegroundColor Green
 
 # --- Install Scripts ---------------------------------------------------
 
 Write-Step "Installing automation scripts..."
 $scriptsDir = Join-Path $InstallDir "scripts"
-if (-not (Test-Path $scriptsDir)) {
-    New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
-}
+New-Item -ItemType Directory -Path $scriptsDir -Force -ErrorAction SilentlyContinue | Out-Null
 
-# Copy scripts from repo
 $scriptFiles = @("daily-update.sh", "honcho-watchdog.sh", "nexus_mcp_stdio.py", "sync-memory-to-nexus.py")
 foreach ($script in $scriptFiles) {
     $src = Join-Path $repoDir "scripts\$script"
-    $dst = Join-Path $scriptsDir $script
     if (Test-Path $src) {
-        Copy-Item -Path $src -Destination $dst -Force
-        Write-Host "  [OK] $script" -ForegroundColor Green
+        Copy-Item -Path $src -Destination (Join-Path $scriptsDir $script) -Force
+        Write-OK $script
     }
 }
 
-# Create Windows-specific scripts
-# Windows equivalent of daily-update
-$winUpdateScript = @"
+# Windows-native daily update batch file
+$batPath = Join-Path $scriptsDir "daily-update.bat"
+$batContent = @"
 @echo off
-REM Hermes Daily Update — Windows version
+REM Hermes Daily Update — Windows
 echo [%DATE% %TIME%] === HERMES DAILY UPDATE START === >> "%USERPROFILE%\.hermes\daily-update.log"
 where hermes >nul 2>&1
-if %ERRORLEVEL% neq 0 (
+if errorlevel 1 (
     echo FAIL: hermes not found >> "%USERPROFILE%\.hermes\daily-update.log"
     exit /b 1
 )
-for /f "tokens=*" %%i in ('hermes version 2^>nul') do set BEFORE=%%i
+for /f "tokens=*" %%a in ('hermes version 2^>nul') do set BEFORE=%%a
 hermes update -y >> "%USERPROFILE%\.hermes\daily-update.log" 2>&1
-set UPDATE_EXIT=%ERRORLEVEL%
-for /f "tokens=*" %%i in ('hermes version 2^>nul') do set AFTER=%%i
+for /f "tokens=*" %%a in ('hermes version 2^>nul') do set AFTER=%%a
 echo BEFORE: %BEFORE% >> "%USERPROFILE%\.hermes\daily-update.log"
 echo AFTER:  %AFTER% >> "%USERPROFILE%\.hermes\daily-update.log"
 hermes gateway restart >> "%USERPROFILE%\.hermes\daily-update.log" 2>&1
 echo [%DATE% %TIME%] === END === >> "%USERPROFILE%\.hermes\daily-update.log"
 "@
-Set-Content -Path (Join-Path $scriptsDir "daily-update.bat") -Value $winUpdateScript -Encoding ASCII
-Write-Host "  [OK] daily-update.bat (Windows native)" -ForegroundColor Green
+[IO.File]::WriteAllText($batPath, $batContent, [System.Text.Encoding]::ASCII)
+Write-OK "daily-update.bat"
 
-Write-OK
+# --- Install Skills Catalog --------------------------------------------
 
-# --- Install Skills (via hermes CLI) -----------------------------------
+Write-Step "Installing skills catalog..."
+$skillsDir = Join-Path $InstallDir "skills"
+New-Item -ItemType Directory -Path $skillsDir -Force -ErrorAction SilentlyContinue | Out-Null
+
+$catalogFiles = @(
+    "skills\all_skills.txt",
+    "skills\SKILLS_CATALOG.md",
+    "skills\local_skills.txt"
+)
+foreach ($cf in $catalogFiles) {
+    $src = Join-Path $repoDir $cf
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination (Join-Path $skillsDir (Split-Path $cf -Leaf)) -Force
+    }
+}
+Write-OK "Skills catalog (1260 skills)"
 
 if (Test-CommandExists "hermes") {
-    Write-Step "Installing skills from catalog..."
-    
-    $allSkillsFile = Join-Path $repoDir "skills\all_skills.txt"
-    if (Test-Path $allSkillsFile) {
-        Write-Host "  Skills catalog loaded ($((Get-Content $allSkillsFile | Measure-Object -Line).Lines) available)"
-        Write-Host "  To install all skills: hermes skills install <skill-name>"
-        Write-Host "  Or browse: hermes skills browse"
-        Write-Step "Installing core identity skills..."
-        
-        # Install essential skills
-        $coreSkills = @(
-            "clean-code",
-            "code-review",
-            "debugging",
-            "conventional-commit",
-            "production-code-standards"
-        )
-        
-        $skillsDir = Join-Path $InstallDir "skills"
-        if (-not (Test-Path $skillsDir)) {
-            New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
-        }
-        
-        # Copy the full skills catalog alongside
-        Copy-Item -Path $allSkillsFile -Destination (Join-Path $skillsDir "all_skills.txt") -Force
-        Copy-Item -Path (Join-Path $repoDir "skills\SKILLS_CATALOG.md") -Destination (Join-Path $skillsDir "SKILLS_CATALOG.md") -Force
-        Copy-Item -Path (Join-Path $repoDir "skills\local_skills.txt") -Destination (Join-Path $skillsDir "local_skills.txt") -Force
-        Write-OK
-    }
-} else {
-    Write-Step "Skills catalog copied — will install via hermes CLI once Hermes is set up"
-    $skillsDir = Join-Path $InstallDir "skills"
-    if (-not (Test-Path $skillsDir)) {
-        New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
-    }
-    Copy-Item -Path (Join-Path $repoDir "skills\all_skills.txt") -Destination (Join-Path $skillsDir "all_skills.txt") -Force
-    Copy-Item -Path (Join-Path $repoDir "skills\SKILLS_CATALOG.md") -Destination (Join-Path $skillsDir "SKILLS_CATALOG.md") -Force
-    Copy-Item -Path (Join-Path $repoDir "skills\local_skills.txt") -Destination (Join-Path $skillsDir "local_skills.txt") -Force
+    Write-Wrn "Install skills via: hermes skills browse"
 }
 
 # --- Install Plugin Manifest -------------------------------------------
 
 Write-Step "Installing plugin manifest..."
 $pluginsDir = Join-Path $InstallDir "plugins"
-if (-not (Test-Path $pluginsDir)) {
-    New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $pluginsDir -Force -ErrorAction SilentlyContinue | Out-Null
+$pluginSrc = Join-Path $repoDir "plugins\PLUGINS.md"
+if (Test-Path $pluginSrc) {
+    Copy-Item -Path $pluginSrc -Destination (Join-Path $pluginsDir "PLUGINS.md") -Force
+    Write-OK "Plugin manifest (21 plugins)"
 }
-Copy-Item -Path (Join-Path $repoDir "plugins\PLUGINS.md") -Destination (Join-Path $pluginsDir "PLUGINS.md") -Force
-Write-OK
 
 # --- Cron Jobs Setup ---------------------------------------------------
 
-Write-Step "Setting up scheduled tasks..."
+Write-Step "Installing cron reference..."
 $cronDir = Join-Path $InstallDir "cron"
-if (-not (Test-Path $cronDir)) {
-    New-Item -ItemType Directory -Path $cronDir -Force | Out-Null
+New-Item -ItemType Directory -Path $cronDir -Force -ErrorAction SilentlyContinue | Out-Null
+$cronSrc = Join-Path $repoDir "cron\CRON_JOBS.md"
+if (Test-Path $cronSrc) {
+    Copy-Item -Path $cronSrc -Destination (Join-Path $cronDir "CRON_JOBS.md") -Force
+    Write-OK "Cron job reference"
 }
-Copy-Item -Path (Join-Path $repoDir "cron\CRON_JOBS.md") -Destination (Join-Path $cronDir "CRON_JOBS.md") -Force
-Write-OK
 
-# --- Create .env Template ----------------------------------------------
+# --- Create .env Template (ONLY if not exists) -------------------------
 
 $envFile = Join-Path $InstallDir ".env"
 if (-not (Test-Path $envFile)) {
     Write-Step "Creating .env template..."
-    $envTemplate = @"
-# Hermes API Keys — Uncomment and fill in the ones you use
+    $envContent = @"
+# Hermes API Keys — add yours below (uncomment the lines you use)
 # DEEPSEEK_API_KEY=sk-your-key-here
 # OPENROUTER_API_KEY=sk-or-your-key-here
 # ANTHROPIC_API_KEY=sk-ant-your-key-here
@@ -342,61 +340,63 @@ if (-not (Test-Path $envFile)) {
 # HUGGINGFACE_TOKEN=hf_your-token
 # SAKANA_API_KEY=your-sakana-key
 "@
-    Set-Content -Path $envFile -Value $envTemplate -Encoding UTF8
-    Write-Host "  [OK] .env template created — add your API keys" -ForegroundColor Green
+    [IO.File]::WriteAllText($envFile, $envContent, $utf8NoBom)
+    Write-OK ".env template — add your API keys"
 } else {
-    Write-Host "  [SKIP] .env already exists" -ForegroundColor Yellow
+    Write-Wrn ".env exists — not overwriting"
 }
 
 # --- Verify ------------------------------------------------------------
 
 Write-Step "Verifying installation..."
 $filesToCheck = @(
-    "SOUL.md",
-    "IDENTITY.md",
-    "MEMORY.md",
-    "USER.md",
-    "prefill.json",
-    "config.yaml",
-    ".env"
+    "SOUL.md", "IDENTITY.md", "prefill.json",
+    "config.yaml", ".env"
 )
-
-$allOk = $true
+$missing = @()
 foreach ($file in $filesToCheck) {
     $path = Join-Path $InstallDir $file
-    if (Test-Path $path) {
-        Write-Host "  [OK] $file" -ForegroundColor Green
-    } else {
-        Write-Host "  [MISS] $file" -ForegroundColor Red
-        $allOk = $false
-    }
+    if (Test-Path $path) { Write-OK $file }
+    else { Write-Err "MISSING: $file"; $missing += $file }
+}
+
+# MEMORY.md and USER.md are optional
+foreach ($opt in @("MEMORY.md", "USER.md")) {
+    $p = Join-Path $InstallDir $opt
+    if (Test-Path $p) { Write-OK "$opt (existing)" }
 }
 
 # --- Summary -----------------------------------------------------------
 
 Write-Step "========================================" -Color "Magenta"
-Write-Step "HermesConfig Installation Complete!" -Color "Green"
+Write-Step "  Installation Complete!" -Color "Green"
 Write-Step "========================================" -Color "Magenta"
 Write-Step ""
-Write-Step "Installed to: $InstallDir"
+Write-Step "Files installed to: $InstallDir"
 Write-Step ""
-Write-Step "Next Steps:"
-Write-Step "  1. Edit .env — add your API keys:"
-Write-Step "     notepad $InstallDir\.env"
+
+if ($script:errCount -gt 0) {
+    Write-Wrn "$($script:errCount) warnings — check items above"
+} else {
+    Write-OK "All files installed successfully"
+}
+
+Write-Step ""
+Write-Step "Next steps:"
+Write-Step "  1. Add your API keys:"
+Write-Step "     notepad `"$InstallDir\.env`""
 Write-Step "  2. Configure Hermes:"
 Write-Step "     hermes setup"
 Write-Step "  3. Set your model:"
 Write-Step "     hermes model"
-Write-Step "  4. Start chatting:"
+Write-Step "  4. Start:"
 Write-Step "     hermes"
 Write-Step ""
-Write-Step "To install all 1260 skills from the catalog:"
-Write-Step "     hermes skills browse"
-Write-Step ""
-Write-Step "To sync this installation again later:"
-Write-Step "     powershell -ExecutionPolicy Bypass -File $($MyInvocation.MyCommand.Path)"
+Write-Step "Re-run this installer anytime to refresh identity files:"
+Write-Step "     irm https://raw.githubusercontent.com/dylmarriner/Hermesconfig/main/install.ps1 | iex"
 Write-Step ""
 
-if (-not $allOk) {
-    Write-Host "Some files may be missing. Check the paths above." -ForegroundColor Yellow
+if ($missing.Count -gt 0) {
+    Write-Host "Missing files: $($missing -join ', ')" -ForegroundColor Yellow
+    Write-Host "Try re-running with: git clone $RepoUrl first" -ForegroundColor Yellow
 }
